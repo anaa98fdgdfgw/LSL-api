@@ -301,10 +301,10 @@ InterceptAccess(key kAccessor, integer iAuth, string sType) {
         SendAccessNotification(kAccessor, sGender);
     }
     
-    // Check access control
-    if (!CheckAccess(kAccessor, iAuth)) {
+    // Check access control only for public access
+    if (iAuth == CMD_EVERYONE && !CheckAccess(kAccessor, iAuth)) {
         SendRejectionMessage(kAccessor);
-        return FALSE; // Block access
+        return FALSE; // Indicate access should be restricted
     }
     
     return TRUE; // Allow access
@@ -359,6 +359,10 @@ state active {
         
         // Check RLV status
         llMessageLinked(LINK_SET, RLV_QUERY, "", "");
+        
+        // Initialize leash state by checking if currently leashed
+        // This is a simple check - if we can't determine state, we default to unleashed
+        g_iLeashed = FALSE;
     }
     
     timer() {
@@ -377,6 +381,10 @@ state active {
             }
         } else {
             // Custom message input timeout
+            if (g_iTouchListener) {
+                llListenRemove(g_iTouchListener);
+                g_iTouchListener = 0;
+            }
             llSetTimerEvent(0);
         }
     }
@@ -517,8 +525,8 @@ state active {
                         llMessageLinked(LINK_SET, NOTIFY, "0Custom rejection message cleared.", kAv);
                         CustomMessageMenu(kAv, iAuth);
                     } else if (sMsg == "Set Message") {
-                        llMessageLinked(LINK_SET, NOTIFY, "0Type your custom rejection message in local chat. It will be sent to users whose gender is disabled.", kAv);
-                        llListen(0, "", kAv, "");
+                        llMessageLinked(LINK_SET, NOTIFY, "0Type your custom rejection message in local chat within 30 seconds.", kAv);
+                        g_iTouchListener = llListen(0, "", kAv, "");
                         llSetTimerEvent(30.0); // 30 second timeout for message input
                     }
                 }
@@ -553,8 +561,12 @@ state active {
     }
     
     listen(integer iChannel, string sName, key kSpeaker, string sMessage) {
-        if (iChannel == 0 && kSpeaker != g_kWearer) {
+        if (iChannel == 0 && kSpeaker != g_kWearer && g_iTouchListener != 0) {
             // Custom message input
+            if (g_iTouchListener) {
+                llListenRemove(g_iTouchListener);
+                g_iTouchListener = 0;
+            }
             g_sCustomMessage = sMessage;
             llMessageLinked(LINK_SET, LM_SETTING_SAVE, g_sToken + "custommessage=" + sMessage, "");
             llMessageLinked(LINK_SET, NOTIFY, "0Custom rejection message set to: \"" + sMessage + "\"", kSpeaker);
