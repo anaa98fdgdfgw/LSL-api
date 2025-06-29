@@ -31,6 +31,16 @@ string g_sDeniedMsg = "";            // message sent to denied user
 integer g_iHideState;                // current collar hide state
 integer g_iRestoreHide = FALSE;      // track hide restore after leash
 
+// gender detection helpers
+float SCAN_RANGE = 20.0;
+float SCAN_TIME  = 30.0;
+integer g_iScanner;                  // sensor running handle
+key g_kScanTarget;                   // current rlv scan target
+integer g_iRlvChan;                  // channel used for rlv @getgender
+integer g_iRlvHandle;                // listener handle
+list g_lMaleKeys = ["signature","jake","gianni","legacy male","apollo","niramyth"];
+list g_lFemaleKeys = ["maitreya","legacy","kupra","freya","lara","isis","venus","belleza","slink","inithium"];
+
 string LSDRead(string token){
     return llLinksetDataRead(LSDPrefix+"_"+token);
 }
@@ -39,9 +49,35 @@ LSDWrite(string token, string val){
     llLinksetDataWrite(LSDPrefix+"_"+token,val);
 }
 
+integer ContainsAny(string str, list keys){
+    str = llToLower(str);
+    integer i;
+    for(i=0;i<llGetListLength(keys);++i){
+        if(~llSubStringIndex(str,llList2String(keys,i))) return TRUE;
+    }
+    return FALSE;
+}
+
+integer GetCachedGender(key kAv){
+    string s = llLinksetDataRead(LSDPrefix+"_gender_"+(string)kAv);
+    if(s!="") return (integer)s;
+    return 2;
+}
+
+SetCachedGender(key kAv, integer g){
+    llLinksetDataWrite(LSDPrefix+"_gender_"+(string)kAv,(string)g);
+}
+
 integer GetGender(key kAv){
-    // TODO: implement RLV query or attachment scan
-    return 2; // unknown
+    integer g = GetCachedGender(kAv);
+    if(g != 2) return g;
+
+    g_kScanTarget = kAv;
+    g_iRlvChan = -(1000 + (integer)llFrand(1000000.0));
+    g_iRlvHandle = llListen(g_iRlvChan,"",kAv,"");
+    llRegionSayTo(kAv,g_iRlvChan,"@getgender="+(string)g_iRlvChan);
+    llSetTimerEvent(5.0);
+    return 2; // unknown until response or scan
 }
 
 ShowCollar(){
@@ -79,9 +115,46 @@ default{
         s = LSDRead("allowed"); if(s!="") g_iAllowedGender=(integer)s; else LSDWrite("allowed","2");
         g_sDeniedMsg = LSDRead("message");
         g_iHideState = (integer)llLinksetDataRead("global_hide");
+        llSensorRepeat("","",SCRIPTED|PASSIVE,SCAN_RANGE,PI,SCAN_TIME);
     }
 
     on_rez(integer p){ llResetScript(); }
+
+    sensor(integer n){
+        integer i;
+        for(i=0;i<n;i++){
+            key owner = llDetectedOwner(i);
+            if(owner==g_kWearer) continue; // ignore wearer attachments
+            if(GetCachedGender(owner)!=2) continue;
+            integer gender = 2;
+            string name = llDetectedName(i);
+            if(ContainsAny(name,g_lFemaleKeys)) gender=1;
+            else if(ContainsAny(name,g_lMaleKeys)) gender=0;
+            if(gender!=2) SetCachedGender(owner,gender);
+        }
+    }
+
+    listen(integer chan,string name,key id,string msg){
+        if(chan==g_iRlvChan && id==g_kScanTarget){
+            llListenRemove(g_iRlvHandle); g_iRlvHandle=0;
+            integer gender = 2;
+            string l = llToLower(msg);
+            if(l=="male") gender=0;
+            else if(l=="female") gender=1;
+            if(gender!=2) SetCachedGender(id,gender);
+            else llSensor("","",SCRIPTED|PASSIVE,SCAN_RANGE,PI);
+            g_kScanTarget=NULL_KEY;
+            llSetTimerEvent(0);
+        }
+    }
+
+    timer(){
+        if(g_kScanTarget){
+            llListenRemove(g_iRlvHandle); g_iRlvHandle=0;
+            llSensor("","",SCRIPTED|PASSIVE,SCAN_RANGE,PI);
+        }
+        llSetTimerEvent(0);
+    }
 
     link_message(integer iSender, integer iNum, string sStr, key kID){
         if(iNum >= CMD_OWNER && iNum <= CMD_EVERYONE){
