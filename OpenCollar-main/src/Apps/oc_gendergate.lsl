@@ -124,13 +124,15 @@ default{
         integer i;
         for(i=0;i<n;i++){
             key owner = llDetectedOwner(i);
-            if(owner==g_kWearer) continue; // ignore wearer attachments
-            if(GetCachedGender(owner)!=2) continue;
-            integer gender = 2;
-            string name = llDetectedName(i);
-            if(ContainsAny(name,g_lFemaleKeys)) gender=1;
-            else if(ContainsAny(name,g_lMaleKeys)) gender=0;
-            if(gender!=2) SetCachedGender(owner,gender);
+            if(owner != g_kWearer){ // ignore wearer attachments
+                if(GetCachedGender(owner) == 2){
+                    integer gender = 2;
+                    string name = llDetectedName(i);
+                    if(ContainsAny(name, g_lFemaleKeys)) gender = 1;
+                    else if(ContainsAny(name, g_lMaleKeys)) gender = 0;
+                    if(gender != 2) SetCachedGender(owner, gender);
+                }
+            }
         }
     }
 
