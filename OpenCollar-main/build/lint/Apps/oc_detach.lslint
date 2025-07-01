@@ -1,0 +1,15 @@
+src/Apps/oc_detach.lsl:: WARN:: ( 36,  9): variable `CMD_TRUSTED' declared but never used.
+src/Apps/oc_detach.lsl:: WARN:: ( 37,  9): variable `CMD_GROUP' declared but never used.
+src/Apps/oc_detach.lsl:: WARN:: ( 38,  9): variable `CMD_WEARER' declared but never used.
+src/Apps/oc_detach.lsl:: WARN:: ( 40,  9): variable `CMD_RLV_RELAY' declared but never used.
+src/Apps/oc_detach.lsl:: WARN:: ( 41,  9): variable `CMD_SAFEWORD' declared but never used.
+src/Apps/oc_detach.lsl:: WARN:: ( 42,  9): variable `CMD_RELAY_SAFEWORD' declared but never used.
+src/Apps/oc_detach.lsl:: WARN:: ( 44,  9): variable `NOTIFY' declared but never used.
+src/Apps/oc_detach.lsl:: WARN:: ( 56,  9): variable `MENUNAME_REMOVE' declared but never used.
+src/Apps/oc_detach.lsl:: WARN:: ( 58,  9): variable `RLV_CMD' declared but never used.
+src/Apps/oc_detach.lsl:: WARN:: ( 59,  9): variable `RLV_REFRESH' declared but never used.
+src/Apps/oc_detach.lsl:: WARN:: ( 61,  9): variable `RLV_OFF' declared but never used.
+src/Apps/oc_detach.lsl:: WARN:: ( 62,  9): variable `RLV_ON' declared but never used.
+src/Apps/oc_detach.lsl:: WARN:: ( 68,  8): variable `ALL' declared but never used.
+src/Apps/oc_detach.lsl:: WARN:: (106,  9): variable `g_iLocked' declared but never used.
+TOTAL:: Errors: 0  Warnings: 14

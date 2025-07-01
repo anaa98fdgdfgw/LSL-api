@@ -1,0 +1,17 @@
+src/Apps/oc_timer.lsl::ERROR:: (108, 12): `llLinksetDataRead' is undeclared.
+src/Apps/oc_timer.lsl::ERROR:: (112,  5): `llLinksetDataWrite' is undeclared.
+src/Apps/oc_timer.lsl::ERROR:: (138, 12): `llLinksetDataListKeys' is undeclared.
+src/Apps/oc_timer.lsl::ERROR:: (309, 42): `llLinksetDataRead' is undeclared.
+src/Apps/oc_timer.lsl::ERROR:: (325, 31): `llLinksetDataRead' is undeclared.
+src/Apps/oc_timer.lsl::ERROR:: (327, 10): `llLinksetDataWrite' is undeclared.
+src/Apps/oc_timer.lsl::ERROR:: (345, 26): `llLinksetDataRead' is undeclared.
+src/Apps/oc_timer.lsl::ERROR:: (348,  5): `llLinksetDataWrite' is undeclared.
+src/Apps/oc_timer.lsl:: WARN:: ( 20,  9): variable `CMD_TRUSTED' declared but never used.
+src/Apps/oc_timer.lsl:: WARN:: ( 21,  9): variable `CMD_GROUP' declared but never used.
+src/Apps/oc_timer.lsl:: WARN:: ( 22,  9): variable `CMD_WEARER' declared but never used.
+src/Apps/oc_timer.lsl:: WARN:: ( 39,  9): variable `MENUNAME_REMOVE' declared but never used.
+src/Apps/oc_timer.lsl:: WARN:: ( 53,  5): variable `g_kMenuUser' declared but never used.
+src/Apps/oc_timer.lsl:: WARN:: (163, 35): variable `sCmd' declared but never used.
+src/Apps/oc_timer.lsl:: WARN:: (185, 12): Declaration of `sCmd' in this scope shadows previous declaration at (163, 35)
+src/Apps/oc_timer.lsl:: WARN:: (232, 20): Declaration of `sVal' in this scope shadows previous declaration at (186, 12)
+TOTAL:: Errors: 8  Warnings: 8
