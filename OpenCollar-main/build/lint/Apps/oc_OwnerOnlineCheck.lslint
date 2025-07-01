@@ -1,0 +1,3 @@
+src/Apps/oc_OwnerOnlineCheck.lsl:: WARN:: ( 38,  9): variable `LM_SETTING_DELETE' declared but never used.
+src/Apps/oc_OwnerOnlineCheck.lsl:: WARN:: (101,  9): variable `g_iLocked' declared but never used.
+TOTAL:: Errors: 0  Warnings: 2

@@ -1,0 +1,7 @@
+src/Apps/oc_outfits.lsl:: WARN:: ( 69,  9): variable `RLV_CMD' declared but never used.
+src/Apps/oc_outfits.lsl:: WARN:: ( 70,  9): variable `RLV_REFRESH' declared but never used.
+src/Apps/oc_outfits.lsl:: WARN:: ( 71,  9): variable `DO_RLV_REFRESH' declared but never used.
+src/Apps/oc_outfits.lsl:: WARN:: ( 72,  9): variable `RLV_CLEAR' declared but never used.
+src/Apps/oc_outfits.lsl:: WARN:: ( 73,  9): variable `RLV_VERSION' declared but never used.
+src/Apps/oc_outfits.lsl:: WARN:: ( 75,  9): variable `RLV_CMD_OVERRIDE' declared but never used.
+TOTAL:: Errors: 0  Warnings: 6

@@ -69,6 +69,8 @@ string  g_sCurrentMenu = "";
 string  g_sLastCommand = "";
 integer g_iSendHomeAfterScan = TRUE;
 integer g_iScanAttempts = 0;
+float   g_fRequestStartTime = 0.0; // Pour le timeout des requêtes HTTP
+integer g_iRequestTimeout = 30;    // Timeout en secondes
 
 //----------------------------------------
 // UTILITY FUNCTIONS
@@ -162,42 +164,116 @@ string DetectGenderFromBody(list attachments) {
     return "unknown";
 }
 
-// Fonction pour traiter les réponses de getwearables
+// Fonction pour traiter les réponses de getwearables - Version améliorée
 list ProcessWearablesData(string body) {
     // Extrait les données de la réponse
     string dataContent = GetValueFromResponse(body, "data");
-    if(dataContent == "") return [];
+    if(dataContent == "") {
+        Debug("No data content found in response");
+        return [];
+    }
     
     Debug("Processing wearables data (length: " + (string)llStringLength(dataContent) + ")");
     
+    // Validation des données - vérifier que c'est du JSON valide
+    if(llSubStringIndex(dataContent, "{") == -1 && llSubStringIndex(dataContent, "[") == -1) {
+        Debug("Data doesn't appear to be valid JSON format");
+        // Essayer de parser comme CSV simple en fallback
+        list csvItems = llCSV2List(dataContent);
+        if(llGetListLength(csvItems) > 0) {
+            Debug("Parsed as CSV fallback with " + (string)llGetListLength(csvItems) + " items");
+            return csvItems;
+        }
+        return [];
+    }
+    
     list results = [];
     
-    // Recherche des noms dans le format JSON
+    // Méthode 1: Recherche de "name":"value" dans le JSON
     integer startPos = 0;
-    integer namePos;
+    integer maxItems = 50; // Limite de sécurité
     
-    // Recherche de toutes les occurrences de "name":"
-    while((namePos = llSubStringIndex(llGetSubString(dataContent, startPos, -1), "\"name\":\"")) != -1) {
-        namePos += startPos + 8; // Position après "name":"
-        integer endPos = llSubStringIndex(llGetSubString(dataContent, namePos, -1), "\"");
-        if(endPos != -1) {
-            string itemName = llGetSubString(dataContent, namePos, namePos + endPos - 1);
-            results += [itemName];
-            startPos = namePos + endPos + 1;
-        }
-        else {
-            break;
-        }
-        
-        // Limite pour éviter une boucle infinie
-        if(llGetListLength(results) > 50) {
-            Debug("Reached max items limit (50) during parsing");
-            break;
+    while(startPos < llStringLength(dataContent) && llGetListLength(results) < maxItems) {
+        // Chercher le pattern "name":"
+        integer namePos = llSubStringIndex(llGetSubString(dataContent, startPos, -1), "\"name\":\"");
+        if(namePos == -1) {
+            startPos = llStringLength(dataContent); // Force exit
+        } else {
+            namePos += startPos + 8; // Position après "name":"
+            
+            // Chercher la fin de la valeur
+            integer endPos = llSubStringIndex(llGetSubString(dataContent, namePos, -1), "\"");
+            if(endPos == -1) {
+                startPos = llStringLength(dataContent); // Force exit
+            } else {
+                string itemName = llGetSubString(dataContent, namePos, namePos + endPos - 1);
+                
+                // Validation du nom d'item - ignorer les valeurs vides ou invalides
+                if(llStringLength(itemName) > 0 && itemName != "null" && itemName != "undefined") {
+                    // Nettoyer les caractères d'échappement JSON
+                    itemName = llDumpList2String(llParseString2List(itemName, ["\\\""], []), "\"");
+                    itemName = llDumpList2String(llParseString2List(itemName, ["\\\\"], []), "\\");
+                    itemName = llDumpList2String(llParseString2List(itemName, ["\\n"], []), "");
+                    itemName = llDumpList2String(llParseString2List(itemName, ["\\r"], []), "");
+                    itemName = llDumpList2String(llParseString2List(itemName, ["\\t"], []), " ");
+                    
+                    results += [itemName];
+                }
+                
+                startPos = namePos + endPos + 1;
+            }
         }
     }
     
-    Debug("Extracted " + (string)llGetListLength(results) + " wearables");
-    return results;
+    // Méthode 2: Si la première méthode n'a pas donné de résultats, essayer une approche différente
+    if(llGetListLength(results) == 0) {
+        Debug("Primary parsing failed, trying alternative methods");
+        
+        // Chercher des patterns alternatifs comme juste des noms d'objets
+        startPos = 0;
+        while(startPos < llStringLength(dataContent) && llGetListLength(results) < maxItems) {
+            integer quotePos = llSubStringIndex(llGetSubString(dataContent, startPos, -1), "\"");
+            if(quotePos == -1) {
+                startPos = llStringLength(dataContent); // Force exit
+            } else {
+                quotePos += startPos + 1;
+                integer endQuotePos = llSubStringIndex(llGetSubString(dataContent, quotePos, -1), "\"");
+                if(endQuotePos == -1) {
+                    startPos = llStringLength(dataContent); // Force exit
+                } else {
+                    string potentialItem = llGetSubString(dataContent, quotePos, quotePos + endQuotePos - 1);
+                    
+                    // Filter pour les noms d'objets vraisemblables (contiennent des lettres et > 2 caractères)
+                    if(llStringLength(potentialItem) > 2 && 
+                       (llSubStringIndex(potentialItem, "Body") != -1 || 
+                        llSubStringIndex(potentialItem, "Head") != -1 ||
+                        llSubStringIndex(potentialItem, "Hair") != -1 ||
+                        llSubStringIndex(potentialItem, "Mesh") != -1 ||
+                        llToLower(potentialItem) != potentialItem || // Contient des majuscules
+                        llSubStringIndex(potentialItem, " ") != -1)) { // Contient des espaces
+                        results += [potentialItem];
+                    }
+                    
+                    startPos = quotePos + endQuotePos + 1;
+                }
+            }
+        }
+    }
+    
+    Debug("Extracted " + (string)llGetListLength(results) + " wearables using improved parsing");
+    
+    // Déduplication des résultats
+    list uniqueResults = [];
+    integer i;
+    for(i = 0; i < llGetListLength(results); i++) {
+        string item = llList2String(results, i);
+        if(llListFindList(uniqueResults, [item]) == -1) {
+            uniqueResults += [item];
+        }
+    }
+    
+    Debug("After deduplication: " + (string)llGetListLength(uniqueResults) + " unique items");
+    return uniqueResults;
 }
 
 list ParseSLurl(string slurl) {
@@ -231,18 +307,25 @@ ScanAvatarWithCorrade(key targetKey) {
         "group", CORRADE_GROUP,
         "password", CORRADE_PASS,
         "name", CORRADE_USERNAME,
-        "entity", "key",
-        "key", (string)targetKey,
+        "agent", (string)targetKey,
         "format", "json"
     ]);
     
     g_sLastCommand = "getwearables";
     g_iScanAttempts++;
+    g_fRequestStartTime = llGetTime(); // Enregistrer le début de la requête
     
     Debug("Scan attempt #" + (string)g_iScanAttempts + " for avatar: " + llKey2Name(targetKey) + " using getwearables command");
     llInstantMessage(g_kUserID, "[GuardGender] Scanning avatar attachments... (attempt " + (string)g_iScanAttempts + ")");
     
-    g_kRequestID = llHTTPRequest(CORRADE_URL, [HTTP_METHOD, "POST", HTTP_MIMETYPE, "application/x-www-form-urlencoded"], cmd);
+    g_kRequestID = llHTTPRequest(CORRADE_URL, [
+        HTTP_METHOD, "POST", 
+        HTTP_MIMETYPE, "application/x-www-form-urlencoded",
+        HTTP_CUSTOM_HEADER, "Connection", "close" // Forcer la fermeture de connexion pour éviter les timeouts
+    ], cmd);
+    
+    // Vérifier périodiquement si la requête a timeout
+    llSetTimerEvent(5.0);
 }
 
 //----------------------------------------
@@ -545,6 +628,7 @@ TestCorradeConnection(key av) {
     g_iTestingBot = TRUE;
     g_kUserID = av;
     g_sLastCommand = "version";
+    g_fRequestStartTime = llGetTime();
     
     llInstantMessage(av, "[GuardGender] Testing Corrade bot connection...");
     
@@ -556,8 +640,10 @@ TestCorradeConnection(key av) {
     ]);
     
     g_kRequestID = llHTTPRequest(CORRADE_URL, 
-        [HTTP_METHOD, "POST", HTTP_MIMETYPE, "application/x-www-form-urlencoded"], 
+        [HTTP_METHOD, "POST", HTTP_MIMETYPE, "application/x-www-form-urlencoded", HTTP_CUSTOM_HEADER, "Connection", "close"], 
         cmd);
+        
+    llSetTimerEvent(5.0);
 }
 
 CorradeTeleport(key avatarKey) {
@@ -580,11 +666,14 @@ CorradeTeleport(key avatarKey) {
     ]);
     
     g_sLastCommand = "teleport";
+    g_fRequestStartTime = llGetTime();
     
     Debug("Sending teleport request to Corrade with position: " + positionString);
     g_kRequestID = llHTTPRequest(CORRADE_URL, 
-        [HTTP_METHOD, "POST", HTTP_MIMETYPE, "application/x-www-form-urlencoded"], 
+        [HTTP_METHOD, "POST", HTTP_MIMETYPE, "application/x-www-form-urlencoded", HTTP_CUSTOM_HEADER, "Connection", "close"], 
         cmd);
+        
+    llSetTimerEvent(5.0);
         
     // Libérer la mémoire
     avatarDetails = [];
@@ -610,11 +699,14 @@ CorradeSendHome(key av) {
         ]);
         
         g_sLastCommand = "gohome";
+        g_fRequestStartTime = llGetTime();
         Debug("Sending bot back to home: " + region + " <" + (string)x + "," + (string)y + "," + (string)z + ">");
         g_kUserID = av;
         g_kRequestID = llHTTPRequest(CORRADE_URL, 
-            [HTTP_METHOD, "POST", HTTP_MIMETYPE, "application/x-www-form-urlencoded"], 
+            [HTTP_METHOD, "POST", HTTP_MIMETYPE, "application/x-www-form-urlencoded", HTTP_CUSTOM_HEADER, "Connection", "close"], 
             cmd);
+            
+        llSetTimerEvent(5.0);
     }
     else {
         llInstantMessage(av, "[GuardGender] Invalid home URL format. Please set a valid SLurl.");
@@ -645,6 +737,8 @@ default {
         g_sLastCommand = "";
         g_iSendHomeAfterScan = TRUE;
         g_iScanAttempts = 0;
+        g_fRequestStartTime = 0.0;
+        g_iRequestTimeout = 30;
         
         // On ne charge pas les mots-clés au démarrage pour économiser de la mémoire
         // Ils seront initialisés plus tard à la demande
@@ -673,6 +767,35 @@ default {
             return;
         }
         
+        // Vérifier le timeout des requêtes HTTP
+        if(g_kRequestID != NULL_KEY && g_fRequestStartTime > 0.0) {
+            float elapsedTime = llGetTime() - g_fRequestStartTime;
+            if(elapsedTime > (float)g_iRequestTimeout) {
+                Debug("HTTP request timeout after " + (string)elapsedTime + " seconds");
+                if(g_kUserID != NULL_KEY) {
+                    llInstantMessage(g_kUserID, "[GuardGender] Request timeout after " + (string)g_iRequestTimeout + " seconds.");
+                    
+                    // Retry logic pour les timeouts
+                    if(g_iScanAttempts < 3) {
+                        integer retryDelay = g_iScanAttempts + 1; // 1, 2, 3 seconds
+                        llInstantMessage(g_kUserID, "[GuardGender] Retrying in " + (string)retryDelay + " seconds... (attempt " + (string)(g_iScanAttempts + 1) + "/3)");
+                        llSetTimerEvent((float)retryDelay);
+                        g_kRequestID = NULL_KEY;
+                        g_fRequestStartTime = 0.0;
+                        return;
+                    } else {
+                        llInstantMessage(g_kUserID, "[GuardGender] Maximum retry attempts reached. Please try again later.");
+                        g_kTarget = NULL_KEY;
+                        g_iScanAttempts = 0;
+                    }
+                }
+                g_kRequestID = NULL_KEY;
+                g_fRequestStartTime = 0.0;
+                llSetTimerEvent(0.0);
+                return;
+            }
+        }
+        
         if(g_iMenuHandle) {
             Debug("Dialog timeout");
             CleanListen();
@@ -687,6 +810,14 @@ default {
             llSetTimerEvent(0.0);
             if(g_kUserID != NULL_KEY) {
                 llInstantMessage(g_kUserID, "[GuardGender] Inspecting avatar...");
+                ScanAvatarWithCorrade(g_kTarget);
+            }
+        }
+        else if(g_iScanAttempts > 0 && g_kTarget != NULL_KEY) {
+            // Retry logic timer
+            Debug("Retry timer fired - retrying scan");
+            llSetTimerEvent(0.0);
+            if(g_kUserID != NULL_KEY) {
                 ScanAvatarWithCorrade(g_kTarget);
             }
         }
@@ -1025,40 +1156,90 @@ default {
     }
     
     http_response(key req, integer status, list metadata, string body) {
-        Debug("HTTP resp: status=" + (string)status);
+        float responseTime = llGetTime() - g_fRequestStartTime;
+        Debug("HTTP response received: status=" + (string)status + ", time=" + (string)responseTime + "s");
         
         if(req != g_kRequestID) {
-            Debug("Ignoring response for different request");
+            Debug("Ignoring response for different request ID");
             return;
         }
         
-        if(g_iDebug && llStringLength(body) < 500) {
-            llOwnerSay("[DEBUG FULL] Response: " + body);
+        // Reset request tracking
+        g_kRequestID = NULL_KEY;
+        g_fRequestStartTime = 0.0;
+        llSetTimerEvent(0.0);
+        
+        // Enhanced debug output
+        if(g_iDebug) {
+            if(llStringLength(body) < 500) {
+                llOwnerSay("[DEBUG FULL] Response body: " + body);
+            } else {
+                llOwnerSay("[DEBUG] Response body length: " + (string)llStringLength(body) + " chars");
+                llOwnerSay("[DEBUG PARTIAL] Response start: " + llGetSubString(body, 0, 200) + "...");
+            }
+            
+            // Analyze response structure
+            if(llSubStringIndex(body, "success=") != -1) {
+                string successValue = GetValueFromResponse(body, "success");
+                llOwnerSay("[DEBUG] Success status: " + successValue);
+            }
+            if(llSubStringIndex(body, "error=") != -1) {
+                string errorValue = GetValueFromResponse(body, "error");
+                llOwnerSay("[DEBUG] Error message: " + errorValue);
+            }
+            if(llSubStringIndex(body, "data=") != -1) {
+                string dataValue = GetValueFromResponse(body, "data");
+                llOwnerSay("[DEBUG] Data length: " + (string)llStringLength(dataValue) + " chars");
+            }
         }
         
         // Vérifier si la requête HTTP a réussi
         if(status != 200) {
             if(g_kUserID != NULL_KEY) {
-                llInstantMessage(g_kUserID, "[GuardGender] Error communicating with Corrade: " + (string)status);
+                string errorMsg = "[GuardGender] HTTP Error " + (string)status + ": ";
                 
                 if(status == 502) {
-                    llInstantMessage(g_kUserID, "[GuardGender] Bad Gateway (502): Corrade service is likely offline.");
+                    errorMsg += "Bad Gateway - Corrade service is likely offline.";
+                } else if(status == 503) {
+                    errorMsg += "Service Unavailable - Corrade service is temporarily unavailable.";
                 } else if(status == 401) {
-                    llInstantMessage(g_kUserID, "[GuardGender] Unauthorized (401): Check username and password.");
+                    errorMsg += "Unauthorized - Check username and password.";
+                } else if(status == 403) {
+                    errorMsg += "Forbidden - Check group permissions.";
                 } else if(status == 404) {
-                    llInstantMessage(g_kUserID, "[GuardGender] Not Found (404): Corrade service URL is incorrect.");
+                    errorMsg += "Not Found - Corrade service URL is incorrect.";
+                } else if(status == 408) {
+                    errorMsg += "Request Timeout - Server took too long to respond.";
+                } else if(status >= 500) {
+                    errorMsg += "Server Error - Corrade service is experiencing issues.";
+                } else if(status >= 400) {
+                    errorMsg += "Client Error - Check request parameters.";
+                } else {
+                    errorMsg += "Unknown error occurred.";
+                }
+                
+                llInstantMessage(g_kUserID, errorMsg);
+                
+                // Implement retry logic with exponential backoff for specific errors
+                if((status == 502 || status == 503 || status == 408) && g_iScanAttempts < 3) {
+                    integer retryDelay = g_iScanAttempts * g_iScanAttempts + 1; // 1, 2, 5 seconds
+                    llInstantMessage(g_kUserID, "[GuardGender] Retrying in " + (string)retryDelay + " seconds... (attempt " + (string)(g_iScanAttempts + 1) + "/3)");
+                    llSetTimerEvent((float)retryDelay);
+                    return;
                 } else {
                     llInstantMessage(g_kUserID, "[GuardGender] Use 'Test Bot' to check connection.");
                 }
             }
             
-            if(g_iSendHomeAfterScan && g_kUserID != NULL_KEY) {
+            if(g_iSendHomeAfterScan && g_kUserID != NULL_KEY && g_iScanAttempts >= 3) {
                 llInstantMessage(g_kUserID, "[GuardGender] Returning bot to home region after error.");
                 CorradeSendHome(g_kUserID);
             }
             
-            g_kTarget = NULL_KEY;
-            g_iScanAttempts = 0;
+            if(g_iScanAttempts >= 3) {
+                g_kTarget = NULL_KEY;
+                g_iScanAttempts = 0;
+            }
             
             // Libérer la mémoire
             metadata = [];
