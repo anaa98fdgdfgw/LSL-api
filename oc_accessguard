@@ -1,0 +1,1243 @@
+/*
+    OpenCollar Plugin · GuardGender (Corrade Attachment Scanner)
+    ----------------------------------------------------
+    GPL-v2 - https://github.com/OpenCollarTeam/OpenCollar
+    
+    This script connects to Corrade to scan avatars'
+    attachments and detect gender using getwearables command.
+    Memory-optimized version with proper avatar detection.
+    
+    Last Updated: 2025-07-01 11:56:42
+    Login: anaa98fdgdfgw
+*/
+
+//----------------------------------------
+// CONFIGURATION
+//----------------------------------------
+string PARENT_MENU = "Apps";
+string MAIN_MENU   = "GuardGender";
+string CORRADE_URL = "http://corrade.sl-anais-kiyori.cloud/";
+string CORRADE_GROUP = "anais_bots";
+string CORRADE_PASS = "5e0d5686903ab84260e4650cba96d2a8d70f0ef3";
+string CORRADE_USERNAME = "anaa98fdgdfgw";
+string CORRADE_BOTNAME = "nucleus";
+string HOME_URL = "http://maps.secondlife.com/secondlife/Backdrop City/123/113/22";
+
+//----------------------------------------
+// GENDER DETECTION CONFIGURATION - Séparé pour réduire la taille des listes en mémoire
+//----------------------------------------
+list FEMALE_BODY_KEYWORDS;  // Initialisé plus tard pour économiser la mémoire
+list MALE_BODY_KEYWORDS;    // Initialisé plus tard pour économiser la mémoire
+
+//----------------------------------------
+// OPEN COLLAR CONSTANTS
+//----------------------------------------
+integer MENUNAME_REQUEST  = 3000;
+integer MENUNAME_RESPONSE = 3001;
+integer MENUNAME_REMOVE   = 3003;
+integer CMD_OWNER = 500;
+integer CMD_WEARER = 503;
+integer LM_SETTING_SAVE = 2000;
+integer LM_SETTING_REQUEST = 2001;
+integer LM_SETTING_RESPONSE = 2002;
+integer LM_SETTING_DELETE = 2003;
+
+integer DIALOG_TIMEOUT    = 30;
+integer MAX_BUTTON_LEN    = 24;
+integer AVATARS_PER_PAGE  = 9;
+integer SCAN_RANGE        = 100;
+
+// Debug mode
+integer g_iDebug = TRUE;
+
+//----------------------------------------
+// INTERNAL STATE
+//----------------------------------------
+integer g_iMenuChan;
+integer g_iMenuListen;
+integer g_iMenuHandle;
+key     g_kTarget;
+key     g_kRequestID;
+key     g_kUserID;
+list    g_lTargetKeys;    // Ne sera rempli que lors d'un scan
+integer g_iTestingBot;
+integer g_iConfiguring;
+string  g_sConfigItem;
+integer g_iGuardianActive = FALSE;
+integer g_iCurrentPage = 0;
+string  g_sCurrentMenu = "";
+string  g_sLastCommand = "";
+integer g_iSendHomeAfterScan = TRUE;
+integer g_iScanAttempts = 0;
+
+//----------------------------------------
+// UTILITY FUNCTIONS
+//----------------------------------------
+Debug(string sMsg) { if(g_iDebug) llOwnerSay("[DEBUG] " + sMsg); }
+string TruncateName(string sName, integer iMaxLen) {
+    if(llStringLength(sName) <= iMaxLen) return sName;
+    return llGetSubString(sName, 0, iMaxLen - 3) + "..";
+}
+string wasKeyValueEncode(list params) {
+    string wasString = ""; integer i;
+    for(i = 0; i < llGetListLength(params); i += 2) {
+        if(i > 0) wasString += "&";
+        wasString += llList2String(params, i) + "=" + llEscapeURL(llList2String(params, i+1));
+    }
+    return wasString;
+}
+
+string wasListToCSV(list items) {
+    string csvString = "";
+    integer i;
+    for(i = 0; i < llGetListLength(items); i++) {
+        if(i > 0) csvString += ",";
+        csvString += llList2String(items, i);
+    }
+    return csvString;
+}
+
+// Fonction pour extraire une valeur d'une réponse HTTP
+string GetValueFromResponse(string body, string keyName) {
+    integer start = llSubStringIndex(body, keyName + "=");
+    if(start == -1) return "";
+    
+    start += llStringLength(keyName) + 1;
+    string value = llGetSubString(body, start, -1);
+    integer end = llSubStringIndex(value, "&");
+    
+    if(end != -1) {
+        value = llGetSubString(value, 0, end - 1);
+    }
+    
+    return llUnescapeURL(value);
+}
+
+// Chargement à la demande des mots-clés
+InitializeGenderKeywords() {
+    // On n'initialise les listes que lorsqu'elles sont nécessaires
+    if(llGetListLength(FEMALE_BODY_KEYWORDS) == 0) {
+        FEMALE_BODY_KEYWORDS = [
+            "maitreya", "lara", "legacy", "perky", "freya", "isis", "venus", "meshbody",
+            "hourglass", "physique", "ebody", "tmp", "slink female", "reborn", "kupra"
+        ];
+    }
+    
+    if(llGetListLength(MALE_BODY_KEYWORDS) == 0) {
+        MALE_BODY_KEYWORDS = [
+            "gianni", "jake", "geralt", "slink male", "signature", "adam", "belleza",
+            "aesthetic", "david", "onupup", "tmp male", "legacy male", "meshbody m"
+        ];
+    }
+}
+
+string DetectGenderFromBody(list attachments) {
+    // Chargement à la demande des mots-clés pour économiser de la mémoire
+    InitializeGenderKeywords();
+    
+    integer i;
+    integer j;
+    integer attachCount = llGetListLength(attachments);
+    integer femaleCount = llGetListLength(FEMALE_BODY_KEYWORDS);
+    integer maleCount = llGetListLength(MALE_BODY_KEYWORDS);
+    
+    for(i = 0; i < attachCount; i++) {
+        string item = llToLower(llList2String(attachments, i));
+        
+        // Vérifier les mots-clés féminins
+        for(j = 0; j < femaleCount; j++) {
+            if(~llSubStringIndex(item, llList2String(FEMALE_BODY_KEYWORDS, j))) {
+                return "female";
+            }
+        }
+        
+        // Vérifier les mots-clés masculins
+        for(j = 0; j < maleCount; j++) {
+            if(~llSubStringIndex(item, llList2String(MALE_BODY_KEYWORDS, j))) {
+                return "male";
+            }
+        }
+    }
+    
+    return "unknown";
+}
+
+// Fonction pour traiter les réponses de getwearables
+list ProcessWearablesData(string body) {
+    // Extrait les données de la réponse
+    string dataContent = GetValueFromResponse(body, "data");
+    if(dataContent == "") return [];
+    
+    Debug("Processing wearables data (length: " + (string)llStringLength(dataContent) + ")");
+    
+    list results = [];
+    
+    // Recherche des noms dans le format JSON
+    integer startPos = 0;
+    integer namePos;
+    
+    // Recherche de toutes les occurrences de "name":"
+    while((namePos = llSubStringIndex(llGetSubString(dataContent, startPos, -1), "\"name\":\"")) != -1) {
+        namePos += startPos + 8; // Position après "name":"
+        integer endPos = llSubStringIndex(llGetSubString(dataContent, namePos, -1), "\"");
+        if(endPos != -1) {
+            string itemName = llGetSubString(dataContent, namePos, namePos + endPos - 1);
+            results += [itemName];
+            startPos = namePos + endPos + 1;
+        }
+        else {
+            break;
+        }
+        
+        // Limite pour éviter une boucle infinie
+        if(llGetListLength(results) > 50) {
+            Debug("Reached max items limit (50) during parsing");
+            break;
+        }
+    }
+    
+    Debug("Extracted " + (string)llGetListLength(results) + " wearables");
+    return results;
+}
+
+list ParseSLurl(string slurl) {
+    integer start = llSubStringIndex(slurl, "secondlife/") + 11;
+    if(start < 11) return [];
+    string remainder = llGetSubString(slurl, start, -1);
+    list parts = llParseString2List(remainder, ["/"], []);
+    if(llGetListLength(parts) >= 4) {
+        string region = llList2String(parts, 0);
+        float x = (float)llList2String(parts, 1);
+        float y = (float)llList2String(parts, 2);
+        float z = (float)llList2String(parts, 3);
+        return [region, x, y, z];
+    }
+    return [];
+}
+
+//----------------------------------------
+// SCAN AVATAR AVEC GETWEARABLES
+//----------------------------------------
+ScanAvatarWithCorrade(key targetKey) {
+    g_kTarget = targetKey;
+    
+    if(g_kUserID == NULL_KEY) {
+        g_kUserID = llGetOwner();
+    }
+    
+    // Utiliser getwearables pour obtenir les données des attachements
+    string cmd = wasKeyValueEncode([
+        "command", "getwearables",
+        "group", CORRADE_GROUP,
+        "password", CORRADE_PASS,
+        "name", CORRADE_USERNAME,
+        "entity", "key",
+        "key", (string)targetKey,
+        "format", "json"
+    ]);
+    
+    g_sLastCommand = "getwearables";
+    g_iScanAttempts++;
+    
+    Debug("Scan attempt #" + (string)g_iScanAttempts + " for avatar: " + llKey2Name(targetKey) + " using getwearables command");
+    llInstantMessage(g_kUserID, "[GuardGender] Scanning avatar attachments... (attempt " + (string)g_iScanAttempts + ")");
+    
+    g_kRequestID = llHTTPRequest(CORRADE_URL, [HTTP_METHOD, "POST", HTTP_MIMETYPE, "application/x-www-form-urlencoded"], cmd);
+}
+
+//----------------------------------------
+// UI HELPERS
+//----------------------------------------
+CleanListen() {
+    if(g_iMenuListen) {
+        llListenRemove(g_iMenuListen);
+        g_iMenuListen = 0;
+    }
+    if(g_iMenuHandle) {
+        llSetTimerEvent(0.0);
+        g_iMenuHandle = 0;
+    }
+}
+
+ReturnToAppsMenu(key av) {
+    Debug("Returning to Apps menu");
+    llMessageLinked(LINK_ROOT, CMD_OWNER, "menu Apps", av);
+}
+
+ShowGuardGenderMenu(key av) {
+    Debug("ShowGuardGenderMenu called for avatar: " + (string)av);
+    CleanListen();
+    g_kUserID = av;
+    
+    g_iCurrentPage = 0;
+    g_sCurrentMenu = "main";
+    
+    g_iMenuChan = -1 - (integer)llFrand(1000000000.0);
+    g_iMenuListen = llListen(g_iMenuChan, "", av, "");
+    
+    string guardianStatus;
+    if(g_iGuardianActive) {
+        guardianStatus = "ON";
+    }
+    else {
+        guardianStatus = "OFF";
+    }
+    
+    string guardianButton;
+    if(g_iGuardianActive) {
+        guardianButton = "Guardian OFF";
+    }
+    else {
+        guardianButton = "Guardian ON";
+    }
+    
+    string returnHomeButton;
+    if(g_iSendHomeAfterScan) {
+        returnHomeButton = "Auto-Return OFF";
+    }
+    else {
+        returnHomeButton = "Auto-Return ON";
+    }
+    
+    string autoReturnStatus;
+    if(g_iSendHomeAfterScan) {
+        autoReturnStatus = "ON";
+    } else {
+        autoReturnStatus = "OFF";
+    }
+    
+    llDialog(av,
+        "[GuardGender]\n\n• BotGuardian: Use the bot to scan attachments\n• Guardian: " + guardianStatus + "\n• Auto-Return: " + autoReturnStatus + "\n• Debug: Toggle debug messages",
+        ["BotGuardian", guardianButton, returnHomeButton, "Debug", "Config", "BACK to Apps"], g_iMenuChan);
+    
+    g_iMenuHandle = 1;
+    llSetTimerEvent(DIALOG_TIMEOUT);
+    Debug("GuardGender menu displayed on channel: " + (string)g_iMenuChan);
+}
+
+ShowDebugMenu(key av) {
+    Debug("ShowDebugMenu called for avatar: " + (string)av);
+    CleanListen();
+    g_kUserID = av;
+    g_sCurrentMenu = "debug";
+    
+    g_iMenuChan = -1 - (integer)llFrand(1000000000.0);
+    g_iMenuListen = llListen(g_iMenuChan, "", av, "");
+    
+    string debugStatus;
+    if(g_iDebug) {
+        debugStatus = "ON";
+    }
+    else {
+        debugStatus = "OFF";
+    }
+    
+    string debugButton;
+    if(g_iDebug) {
+        debugButton = "Debug OFF";
+    }
+    else {
+        debugButton = "Debug ON";
+    }
+    
+    llDialog(av,
+        "[Debug Settings]\n\n• Debug Messages: " + debugStatus,
+        [debugButton, "BACK to Gender"], g_iMenuChan);
+    
+    g_iMenuHandle = 1;
+    llSetTimerEvent(DIALOG_TIMEOUT);
+    Debug("Debug menu displayed on channel: " + (string)g_iMenuChan);
+}
+
+ShowBotGuardianMenu(key av) {
+    Debug("ShowBotGuardianMenu called for avatar: " + (string)av);
+    CleanListen();
+    g_kUserID = av;
+    g_sCurrentMenu = "botguardian";
+    
+    g_iMenuChan = -1 - (integer)llFrand(1000000000.0);
+    g_iMenuListen = llListen(g_iMenuChan, "", av, "");
+    
+    llDialog(av,
+        "[BotGuardian]\n\n• Analyze Target: Enter UUID\n• Scan: Choose a nearby avatar\n• Test Bot: Verify connection\n• Send Home: Return bot to home region",
+        ["Analyze Target", "Scan", "Test Bot", "Send Home", "BACK to Gender"], g_iMenuChan);
+    
+    g_iMenuHandle = 1;
+    llSetTimerEvent(DIALOG_TIMEOUT);
+    Debug("BotGuardian menu displayed on channel: " + (string)g_iMenuChan);
+}
+
+ShowConfigMenu(key av) {
+    Debug("ShowConfigMenu called for avatar: " + (string)av);
+    CleanListen();
+    g_kUserID = av;
+    g_sCurrentMenu = "config";
+    g_iConfiguring = FALSE;
+    
+    g_iMenuChan = -1 - (integer)llFrand(1000000000.0);
+    g_iMenuListen = llListen(g_iMenuChan, "", av, "");
+    
+    list homeDetails = ParseSLurl(HOME_URL);
+    string homeRegion = "Not Set";
+    if(llGetListLength(homeDetails) >= 1) {
+        homeRegion = llList2String(homeDetails, 0);
+    }
+    
+    llDialog(av,
+        "[Bot Configuration]\n\n• Bot: " + CORRADE_BOTNAME + "\n• Login: " + CORRADE_USERNAME + "\n• Group: " + CORRADE_GROUP + "\n• Home: " + homeRegion,
+        ["Set Login", "Set Group", "Set Pass", "Set Home", "BACK to Gender"], g_iMenuChan);
+    
+    g_iMenuHandle = 1;
+    llSetTimerEvent(DIALOG_TIMEOUT);
+    Debug("Config menu displayed on channel: " + (string)g_iMenuChan);
+    
+    // Libérer la mémoire après utilisation
+    homeDetails = [];
+}
+
+ShowConfigTextbox(key av, string item) {
+    Debug("ShowConfigTextbox called for: " + item);
+    CleanListen();
+    g_kUserID = av;
+    g_iConfiguring = TRUE;
+    g_sConfigItem = item;
+    g_sCurrentMenu = "configtext";
+    
+    g_iMenuChan = -1 - (integer)llFrand(1000000000.0);
+    g_iMenuListen = llListen(g_iMenuChan, "", av, "");
+    
+    string currentValue = "";
+    string prompt = "";
+    
+    if(item == "login") {
+        currentValue = CORRADE_USERNAME;
+        prompt = "Login Username";
+    }
+    else if(item == "group") {
+        currentValue = CORRADE_GROUP;
+        prompt = "Group Name";
+    }
+    else if(item == "pass") {
+        currentValue = "********";
+        prompt = "Group Password";
+    }
+    else if(item == "home") {
+        currentValue = HOME_URL;
+        prompt = "Home SLurl (http://maps.secondlife.com/secondlife/RegionName/X/Y/Z)";
+    }
+    
+    llTextBox(av, prompt + "\n(currently: " + currentValue + ")\n\nEnter new value:", g_iMenuChan);
+    g_iMenuHandle = 1;
+    llSetTimerEvent(DIALOG_TIMEOUT);
+}
+
+ShowScanMenu(key av) {
+    Debug("ShowScanMenu called for avatar: " + (string)av);
+    CleanListen();
+    g_kUserID = av;
+    g_sCurrentMenu = "scan";
+    
+    // Ne charger les avatars que si nécessaire (page 0 ou liste vide)
+    if(g_iCurrentPage == 0 || llGetListLength(g_lTargetKeys) == 0) {
+        // Vider la liste actuelle pour libérer de la mémoire
+        g_lTargetKeys = [];
+        
+        // Récupérer d'abord les avatars de la parcelle
+        list agents = llGetAgentList(AGENT_LIST_PARCEL, []);
+        Debug("Found " + (string)llGetListLength(agents) + " agents in parcel");
+        
+        // Si la parcelle est vide, récupérer les avatars de la région
+        if(llGetListLength(agents) < 1) {
+            agents = llGetAgentList(AGENT_LIST_REGION, []);
+            Debug("Found " + (string)llGetListLength(agents) + " agents in region");
+        }
+        
+        // Filtrer les avatars
+        integer i;
+        for(i=0; i<llGetListLength(agents); ++i) {
+            key k = llList2Key(agents, i);
+            if(k != llGetOwner()) { // Exclure le propriétaire
+                string name = llKey2Name(k);
+                if(name != "") {
+                    g_lTargetKeys += [k];
+                }
+            }
+        }
+        
+        // Libérer la mémoire de la liste temporaire
+        agents = [];
+    }
+    
+    // Si pas d'avatars, sortir
+    if(llGetListLength(g_lTargetKeys) < 1) { 
+        llInstantMessage(av, "[GuardGender] No avatars nearby.");
+        Debug("No avatars found nearby");
+        return;
+    }
+    
+    // Calcul des pages
+    integer totalPages = (llGetListLength(g_lTargetKeys) + AVATARS_PER_PAGE - 1) / AVATARS_PER_PAGE;
+    
+    // Normalisation de la page actuelle
+    if(g_iCurrentPage >= totalPages) {
+        g_iCurrentPage = 0;
+    }
+    if(g_iCurrentPage < 0) {
+        g_iCurrentPage = totalPages - 1;
+    }
+    
+    // Calcul des indices pour la page actuelle
+    integer startIdx = g_iCurrentPage * AVATARS_PER_PAGE;
+    integer endIdx = startIdx + AVATARS_PER_PAGE - 1;
+    if(endIdx >= llGetListLength(g_lTargetKeys)) {
+        endIdx = llGetListLength(g_lTargetKeys) - 1;
+    }
+    
+    // Construction des boutons pour les avatars
+    list buttons = [];
+    integer i;
+    for(i = startIdx; i <= endIdx; ++i) {
+        key k = llList2Key(g_lTargetKeys, i);
+        string name = llKey2Name(k);
+        string buttonLabel = TruncateName(name, MAX_BUTTON_LEN);
+        buttons += [buttonLabel];
+    }
+    
+    // Ajout des boutons de navigation
+    list navButtons = [];
+    if(totalPages > 1) {
+        navButtons += ["Prev", "Next"];
+    }
+    navButtons += ["BACK to Guard"];
+    
+    // Configuration de l'écoute
+    g_iMenuChan = -1 - (integer)llFrand(1000000000.0);
+    g_iMenuListen = llListen(g_iMenuChan, "", av, "");
+    
+    // Affichage du dialogue
+    string pageInfo = "\nPage " + (string)(g_iCurrentPage + 1) + "/" + (string)totalPages;
+    llDialog(av, "Choose target:" + pageInfo, buttons + navButtons, g_iMenuChan);
+    g_iMenuHandle = 1;
+    llSetTimerEvent(DIALOG_TIMEOUT);
+    
+    Debug("Scan dialog displayed on channel: " + (string)g_iMenuChan + " page " + (string)(g_iCurrentPage + 1) + "/" + (string)totalPages);
+}
+
+ShowUUIDInput(key av) {
+    Debug("ShowUUIDInput called for avatar: " + (string)av);
+    CleanListen();
+    g_kUserID = av;
+    g_sCurrentMenu = "uuid";
+    
+    g_iMenuChan = -1 - (integer)llFrand(1000000000.0);
+    g_iMenuListen = llListen(g_iMenuChan, "", av, "");
+    
+    llTextBox(av, "Enter the UUID of the target to analyze:", g_iMenuChan);
+    g_iMenuHandle = 1;
+    llSetTimerEvent(DIALOG_TIMEOUT);
+}
+
+//----------------------------------------
+// CORRADE HELPERS
+//----------------------------------------
+TestCorradeConnection(key av) {
+    Debug("Testing Corrade connection");
+    g_iTestingBot = TRUE;
+    g_kUserID = av;
+    g_sLastCommand = "version";
+    
+    llInstantMessage(av, "[GuardGender] Testing Corrade bot connection...");
+    
+    string cmd = wasKeyValueEncode([
+        "command", "version",
+        "group", CORRADE_GROUP,
+        "password", CORRADE_PASS,
+        "name", CORRADE_USERNAME
+    ]);
+    
+    g_kRequestID = llHTTPRequest(CORRADE_URL, 
+        [HTTP_METHOD, "POST", HTTP_MIMETYPE, "application/x-www-form-urlencoded"], 
+        cmd);
+}
+
+CorradeTeleport(key avatarKey) {
+    g_iScanAttempts = 0;
+    list avatarDetails = llGetObjectDetails(avatarKey, [OBJECT_POS, OBJECT_ROT]);
+    vector avatarPos = llList2Vector(avatarDetails, 0);
+    
+    avatarPos.z += 1.0;
+    
+    string positionString = "<" + (string)avatarPos.x + "," + (string)avatarPos.y + "," + (string)avatarPos.z + ">";
+    
+    string cmd = wasKeyValueEncode([
+        "command", "teleport",
+        "group", CORRADE_GROUP,
+        "password", CORRADE_PASS,
+        "name", CORRADE_USERNAME,
+        "entity", "region",
+        "region", llGetRegionName(),
+        "position", positionString
+    ]);
+    
+    g_sLastCommand = "teleport";
+    
+    Debug("Sending teleport request to Corrade with position: " + positionString);
+    g_kRequestID = llHTTPRequest(CORRADE_URL, 
+        [HTTP_METHOD, "POST", HTTP_MIMETYPE, "application/x-www-form-urlencoded"], 
+        cmd);
+        
+    // Libérer la mémoire
+    avatarDetails = [];
+}
+
+CorradeSendHome(key av) {
+    list homeDetails = ParseSLurl(HOME_URL);
+    
+    if(llGetListLength(homeDetails) >= 4) {
+        string region = llList2String(homeDetails, 0);
+        float x = llList2Float(homeDetails, 1);
+        float y = llList2Float(homeDetails, 2);
+        float z = llList2Float(homeDetails, 3);
+        
+        string cmd = wasKeyValueEncode([
+            "command", "teleport",
+            "group", CORRADE_GROUP,
+            "password", CORRADE_PASS,
+            "name", CORRADE_USERNAME,
+            "entity", "region",
+            "region", region,
+            "position", "<" + (string)x + "," + (string)y + "," + (string)z + ">"
+        ]);
+        
+        g_sLastCommand = "gohome";
+        Debug("Sending bot back to home: " + region + " <" + (string)x + "," + (string)y + "," + (string)z + ">");
+        g_kUserID = av;
+        g_kRequestID = llHTTPRequest(CORRADE_URL, 
+            [HTTP_METHOD, "POST", HTTP_MIMETYPE, "application/x-www-form-urlencoded"], 
+            cmd);
+    }
+    else {
+        llInstantMessage(av, "[GuardGender] Invalid home URL format. Please set a valid SLurl.");
+    }
+    
+    // Libérer la mémoire
+    homeDetails = [];
+}
+
+//----------------------------------------
+// MAIN STATE
+//----------------------------------------
+default {
+    state_entry() {
+        g_iMenuChan = 0;
+        g_iMenuListen = 0;
+        g_iMenuHandle = 0;
+        g_kTarget = NULL_KEY;
+        g_kRequestID = NULL_KEY;
+        g_kUserID = NULL_KEY;
+        g_lTargetKeys = [];
+        g_iTestingBot = FALSE;
+        g_iConfiguring = FALSE;
+        g_sConfigItem = "";
+        g_iGuardianActive = FALSE;
+        g_iCurrentPage = 0;
+        g_sCurrentMenu = "";
+        g_sLastCommand = "";
+        g_iSendHomeAfterScan = TRUE;
+        g_iScanAttempts = 0;
+        
+        // On ne charge pas les mots-clés au démarrage pour économiser de la mémoire
+        // Ils seront initialisés plus tard à la demande
+        FEMALE_BODY_KEYWORDS = [];
+        MALE_BODY_KEYWORDS = [];
+        
+        Debug("Registering GuardGender menu with OpenCollar");
+        llMessageLinked(LINK_SET, MENUNAME_RESPONSE, PARENT_MENU + "|" + MAIN_MENU, "");
+        
+        llMessageLinked(LINK_SET, MENUNAME_REMOVE, PARENT_MENU + "|SPY", "");
+        llMessageLinked(LINK_ROOT, MENUNAME_REMOVE, PARENT_MENU + "|SPY", "");
+        llMessageLinked(LINK_ROOT, MENUNAME_REMOVE, "Apps|SPY", "");
+        
+        llMessageLinked(LINK_SET, LM_SETTING_REQUEST, "spy_", "");
+        
+        llSetTimerEvent(2.0);
+    }
+    
+    timer() {
+        if(llGetTime() < 3.0) {
+            llMessageLinked(LINK_SET, MENUNAME_RESPONSE, PARENT_MENU + "|" + MAIN_MENU, "");
+            
+            llMessageLinked(LINK_SET, MENUNAME_REMOVE, PARENT_MENU + "|SPY", "");
+            llMessageLinked(LINK_ROOT, MENUNAME_REMOVE, PARENT_MENU + "|SPY", "");
+            llMessageLinked(LINK_ROOT, MENUNAME_REMOVE, "Apps|SPY", "");
+            return;
+        }
+        
+        if(g_iMenuHandle) {
+            Debug("Dialog timeout");
+            CleanListen();
+            if(g_kUserID != NULL_KEY) {
+                llInstantMessage(g_kUserID, "[GuardGender] Time expired for command. Please try again.");
+                g_kUserID = NULL_KEY;
+            }
+            llSetTimerEvent(0.0);
+        } 
+        else if(g_kTarget != NULL_KEY) {
+            Debug("Bot teleport timer fired - proceeding with avatar inspection");
+            llSetTimerEvent(0.0);
+            if(g_kUserID != NULL_KEY) {
+                llInstantMessage(g_kUserID, "[GuardGender] Inspecting avatar...");
+                ScanAvatarWithCorrade(g_kTarget);
+            }
+        }
+        else {
+            llSetTimerEvent(0.0);
+        }
+    }
+    
+    link_message(integer sender, integer num, string str, key id) {
+        Debug("Link message: " + str);
+        
+        if(num == LM_SETTING_RESPONSE) {
+            list params = llParseString2List(str, ["="], []);
+            if(llGetListLength(params) >= 2) {
+                string settingName = llList2String(params, 0);
+                string settingValue = llList2String(params, 1);
+                
+                if(settingName == "spy_botusername") {
+                    CORRADE_USERNAME = settingValue;
+                }
+                else if(settingName == "spy_group") {
+                    CORRADE_GROUP = settingValue;
+                }
+                else if(settingName == "spy_homeurl") {
+                    HOME_URL = settingValue;
+                }
+                else if(settingName == "spy_debug") {
+                    g_iDebug = (integer)settingValue;
+                }
+                else if(settingName == "spy_guardian") {
+                    g_iGuardianActive = (integer)settingValue;
+                }
+                else if(settingName == "spy_autoreturn") {
+                    g_iSendHomeAfterScan = (integer)settingValue;
+                }
+            }
+            
+            // Libération mémoire
+            params = [];
+            return;
+        }
+        
+        if(num == MENUNAME_REQUEST) {
+            if(str == PARENT_MENU) {
+                llMessageLinked(sender, MENUNAME_RESPONSE, PARENT_MENU + "|" + MAIN_MENU, "");
+            }
+        }
+        else if(str == "Apps" || str == PARENT_MENU) {
+            llMessageLinked(sender, MENUNAME_RESPONSE, PARENT_MENU + "|" + MAIN_MENU, "");
+        }
+        else if(str == "menu " + MAIN_MENU || str == MAIN_MENU || 
+                str == "menu GuardGender" || str == "guardgender" || 
+                str == "MENU_" + MAIN_MENU) {
+            ShowGuardGenderMenu(id);
+        }
+        else if(str == "menu_" + llToLower(PARENT_MENU) || str == "menu_apps") {
+            llMessageLinked(sender, MENUNAME_RESPONSE, PARENT_MENU + "|" + MAIN_MENU, "");
+        }
+        else if(llGetSubString(str, 0, 10) == "guardgender_") {
+            string cmd = llGetSubString(str, 11, -1);
+            if(cmd == "menu") ShowGuardGenderMenu(id);
+            else if(cmd == "botguardian") ShowBotGuardianMenu(id);
+            else if(cmd == "scan") ShowScanMenu(id);
+            else if(cmd == "test") TestCorradeConnection(id);
+            else if(cmd == "config") ShowConfigMenu(id);
+            else if(cmd == "debug") ShowDebugMenu(id);
+            else if(cmd == "sendhome") CorradeSendHome(id);
+            else if(cmd == "guardian") {
+                g_iGuardianActive = !g_iGuardianActive;
+                string activationStatus;
+                if(g_iGuardianActive) {
+                    activationStatus = "ACTIVATED";
+                } else {
+                    activationStatus = "DEACTIVATED";
+                }
+                llInstantMessage(id, "[GuardGender] Guardian is now " + activationStatus);
+                llMessageLinked(LINK_SET, LM_SETTING_SAVE, "spy_guardian=" + (string)g_iGuardianActive, "");
+            }
+            else if(cmd == "autoreturn") {
+                g_iSendHomeAfterScan = !g_iSendHomeAfterScan;
+                string returnStatus;
+                if(g_iSendHomeAfterScan) {
+                    returnStatus = "ACTIVATED";
+                } else {
+                    returnStatus = "DEACTIVATED";
+                }
+                llInstantMessage(id, "[GuardGender] Auto-Return is now " + returnStatus);
+                llMessageLinked(LINK_SET, LM_SETTING_SAVE, "spy_autoreturn=" + (string)g_iSendHomeAfterScan, "");
+            }
+        }
+        else if((num >= CMD_OWNER && num <= CMD_WEARER) && 
+                (str == MAIN_MENU || str == llToLower(MAIN_MENU))) {
+            ShowGuardGenderMenu(id);
+        }
+    }
+    
+    listen(integer chan, string nm, key id, string msg) {
+        Debug("Listen on '" + g_sCurrentMenu + "': " + msg);
+        CleanListen();
+        
+        if(g_sCurrentMenu == "main") {
+            if(msg == "BotGuardian") {
+                ShowBotGuardianMenu(id);
+                return;
+            }
+            
+            if(msg == "Debug") {
+                ShowDebugMenu(id);
+                return;
+            }
+            
+            if(msg == "Config") {
+                ShowConfigMenu(id);
+                return;
+            }
+            
+            if(msg == "Guardian ON" || msg == "Guardian OFF") {
+                g_iGuardianActive = !g_iGuardianActive;
+                string activationStatus;
+                if(g_iGuardianActive) {
+                    activationStatus = "ACTIVATED";
+                } else {
+                    activationStatus = "DEACTIVATED";
+                }
+                llInstantMessage(id, "[GuardGender] Guardian is now " + activationStatus);
+                
+                llMessageLinked(LINK_SET, LM_SETTING_SAVE, "spy_guardian=" + (string)g_iGuardianActive, "");
+                
+                ShowGuardGenderMenu(id);
+                return;
+            }
+            
+            if(msg == "Auto-Return ON" || msg == "Auto-Return OFF") {
+                g_iSendHomeAfterScan = !g_iSendHomeAfterScan;
+                string returnStatus;
+                if(g_iSendHomeAfterScan) {
+                    returnStatus = "ACTIVATED";
+                } else {
+                    returnStatus = "DEACTIVATED";
+                }
+                llInstantMessage(id, "[GuardGender] Auto-Return is now " + returnStatus);
+                
+                llMessageLinked(LINK_SET, LM_SETTING_SAVE, "spy_autoreturn=" + (string)g_iSendHomeAfterScan, "");
+                
+                ShowGuardGenderMenu(id);
+                return;
+            }
+            
+            if(msg == "BACK to Apps") {
+                ReturnToAppsMenu(id);
+                return;
+            }
+        }
+        else if(g_sCurrentMenu == "debug") {
+            if(msg == "Debug ON" || msg == "Debug OFF") {
+                g_iDebug = !g_iDebug;
+                string debugStatus;
+                if(g_iDebug) {
+                    debugStatus = "ENABLED";
+                    llOwnerSay("[DEBUG] Debug mode is now ENABLED");
+                } else {
+                    debugStatus = "DISABLED";
+                    llOwnerSay("[INFO] Debug mode is now DISABLED");
+                }
+                llInstantMessage(id, "[GuardGender] Debug mode is now " + debugStatus);
+                
+                llMessageLinked(LINK_SET, LM_SETTING_SAVE, "spy_debug=" + (string)g_iDebug, "");
+                
+                ShowDebugMenu(id);
+                return;
+            }
+            
+            if(msg == "BACK to Gender") {
+                ShowGuardGenderMenu(id);
+                return;
+            }
+        }
+        else if(g_sCurrentMenu == "botguardian") {
+            if(msg == "Analyze Target") {
+                ShowUUIDInput(id);
+                return;
+            }
+            
+            if(msg == "Scan") {
+                g_iCurrentPage = 0;
+                ShowScanMenu(id); 
+                return; 
+            }
+            
+            if(msg == "Test Bot") {
+                TestCorradeConnection(id);
+                return;
+            }
+            
+            if(msg == "Send Home") {
+                llInstantMessage(id, "[GuardGender] Sending bot back to home region...");
+                CorradeSendHome(id);
+                return;
+            }
+            
+            if(msg == "BACK to Gender") {
+                ShowGuardGenderMenu(id);
+                return;
+            }
+        }
+        else if(g_sCurrentMenu == "scan") {
+            if(msg == "Prev") {
+                g_iCurrentPage--;
+                ShowScanMenu(id);
+                return;
+            }
+            
+            if(msg == "Next") {
+                g_iCurrentPage++;
+                ShowScanMenu(id);
+                return;
+            }
+            
+            if(msg == "BACK to Guard") {
+                ShowBotGuardianMenu(id);
+                return;
+            }
+            
+            integer avatarIndex = -1;
+            integer i;
+            for(i = 0; i < llGetListLength(g_lTargetKeys); i++) {
+                key k = llList2Key(g_lTargetKeys, i);
+                string name = llKey2Name(k);
+                if(name == msg || TruncateName(name, MAX_BUTTON_LEN) == msg) {
+                    avatarIndex = i;
+                    i = llGetListLength(g_lTargetKeys); // Force sortie de boucle
+                }
+            }
+            
+            if(avatarIndex >= 0) {
+                g_kTarget = llList2Key(g_lTargetKeys, avatarIndex);
+                
+                llInstantMessage(id, "[GuardGender] Scanning avatar " + llKey2Name(g_kTarget) + " directly...");
+                g_kUserID = id;
+                
+                // Scan direct de l'avatar
+                ScanAvatarWithCorrade(g_kTarget);
+            }
+        }
+        else if(g_sCurrentMenu == "uuid") {
+            if(llStringLength(msg) >= 35 && (key)msg != NULL_KEY) {
+                g_kTarget = (key)msg;
+                
+                llInstantMessage(id, "[GuardGender] Scanning avatar directly...");
+                g_kUserID = id;
+                
+                // Scan direct de l'avatar
+                ScanAvatarWithCorrade(g_kTarget);
+            }
+            else {
+                llInstantMessage(id, "[GuardGender] Invalid UUID format. Please try again.");
+                ShowBotGuardianMenu(id);
+            }
+        }
+        else if(g_sCurrentMenu == "config") {
+            if(msg == "Set Login") {
+                ShowConfigTextbox(id, "login");
+                return;
+            }
+            
+            if(msg == "Set Group") {
+                ShowConfigTextbox(id, "group");
+                return;
+            }
+            
+            if(msg == "Set Pass") {
+                ShowConfigTextbox(id, "pass");
+                return;
+            }
+            
+            if(msg == "Set Home") {
+                ShowConfigTextbox(id, "home");
+                return;
+            }
+            
+            if(msg == "BACK to Gender") {
+                ShowGuardGenderMenu(id);
+                return;
+            }
+        }
+        else if(g_sCurrentMenu == "configtext" && g_iConfiguring) {
+            g_iConfiguring = FALSE;
+            
+            if(llStringLength(msg) > 0) {
+                if(g_sConfigItem == "login") {
+                    CORRADE_USERNAME = msg;
+                    llInstantMessage(id, "[GuardGender] Login username saved: " + CORRADE_USERNAME);
+                    
+                    llMessageLinked(LINK_SET, LM_SETTING_SAVE, "spy_botusername=" + CORRADE_USERNAME, "");
+                }
+                else if(g_sConfigItem == "group") {
+                    CORRADE_GROUP = msg;
+                    llInstantMessage(id, "[GuardGender] Group name saved: " + CORRADE_GROUP);
+                    
+                    llMessageLinked(LINK_SET, LM_SETTING_SAVE, "spy_group=" + CORRADE_GROUP, "");
+                }
+                else if(g_sConfigItem == "pass") {
+                    CORRADE_PASS = msg;
+                    llInstantMessage(id, "[GuardGender] Group password saved.");
+                    
+                }
+                else if(g_sConfigItem == "home") {
+                    list homeDetails = ParseSLurl(msg);
+                    
+                    if(llGetListLength(homeDetails) >= 4) {
+                        HOME_URL = msg;
+                        llInstantMessage(id, "[GuardGender] Home location saved: " + HOME_URL);
+                        
+                        llMessageLinked(LINK_SET, LM_SETTING_SAVE, "spy_homeurl=" + HOME_URL, "");
+                    }
+                    else {
+                        llInstantMessage(id, "[GuardGender] Invalid SLurl format. Please enter a URL like: http://maps.secondlife.com/secondlife/RegionName/X/Y/Z");
+                    }
+                    
+                    // Libérer la mémoire
+                    homeDetails = [];
+                }
+                
+                if(g_sConfigItem == "login" || g_sConfigItem == "group" || g_sConfigItem == "pass") {
+                    TestCorradeConnection(id);
+                }
+                
+                ShowConfigMenu(id);
+            }
+            else {
+                llInstantMessage(id, "[GuardGender] Invalid input. No changes made.");
+                ShowConfigMenu(id);
+            }
+            return;
+        }
+    }
+    
+    http_response(key req, integer status, list metadata, string body) {
+        Debug("HTTP resp: status=" + (string)status);
+        
+        if(req != g_kRequestID) {
+            Debug("Ignoring response for different request");
+            return;
+        }
+        
+        if(g_iDebug && llStringLength(body) < 500) {
+            llOwnerSay("[DEBUG FULL] Response: " + body);
+        }
+        
+        // Vérifier si la requête HTTP a réussi
+        if(status != 200) {
+            if(g_kUserID != NULL_KEY) {
+                llInstantMessage(g_kUserID, "[GuardGender] Error communicating with Corrade: " + (string)status);
+                
+                if(status == 502) {
+                    llInstantMessage(g_kUserID, "[GuardGender] Bad Gateway (502): Corrade service is likely offline.");
+                } else if(status == 401) {
+                    llInstantMessage(g_kUserID, "[GuardGender] Unauthorized (401): Check username and password.");
+                } else if(status == 404) {
+                    llInstantMessage(g_kUserID, "[GuardGender] Not Found (404): Corrade service URL is incorrect.");
+                } else {
+                    llInstantMessage(g_kUserID, "[GuardGender] Use 'Test Bot' to check connection.");
+                }
+            }
+            
+            if(g_iSendHomeAfterScan && g_kUserID != NULL_KEY) {
+                llInstantMessage(g_kUserID, "[GuardGender] Returning bot to home region after error.");
+                CorradeSendHome(g_kUserID);
+            }
+            
+            g_kTarget = NULL_KEY;
+            g_iScanAttempts = 0;
+            
+            // Libérer la mémoire
+            metadata = [];
+            return;
+        }
+        
+        string successValue = GetValueFromResponse(body, "success");
+        
+        // Test Corrade Connection
+        if(g_iTestingBot) {
+            g_iTestingBot = FALSE;
+            
+            if(successValue == "True") {
+                llInstantMessage(g_kUserID, "[GuardGender] Corrade bot connection successful!");
+                llInstantMessage(g_kUserID, "[GuardGender] Bot configured as: " + CORRADE_BOTNAME + " (login: " + CORRADE_USERNAME + ")");
+                
+                string version = GetValueFromResponse(body, "version");
+                if(version != "") {
+                    llInstantMessage(g_kUserID, "[GuardGender] Corrade Version: " + version);
+                } else {
+                    llInstantMessage(g_kUserID, "[GuardGender] Server response: " + body);
+                }
+            } else {
+                llInstantMessage(g_kUserID, "[GuardGender] Error connecting to Corrade bot: Check connection info");
+            }
+            
+            // Libérer la mémoire
+            metadata = [];
+            return;
+        }
+        
+        // Traitement de la commande getwearables
+        if(g_sLastCommand == "getwearables") {
+            if(successValue == "True") {
+                // Extraire et traiter les données des wearables
+                list wearablesData = ProcessWearablesData(body);
+                
+                if(llGetListLength(wearablesData) > 0) {
+                    string gender = DetectGenderFromBody(wearablesData);
+                    string genderIcon;
+                    if(gender == "female") genderIcon = "♀️";
+                    else if(gender == "male") genderIcon = "♂️";
+                    else genderIcon = "❓";
+                    
+                    string result = "[GuardGender] Analysis of " + llKey2Name(g_kTarget) + ":\n\n";
+                    result += "DETECTED GENDER: " + genderIcon + " " + llToUpper(llGetSubString(gender, 0, 0)) + llGetSubString(gender, 1, -1) + "\n\n";
+                    result += "ITEMS DETECTED: " + (string)llGetListLength(wearablesData) + "\n\n";
+                    
+                    integer i;
+                    integer maxItems = llGetListLength(wearablesData);
+                    if(maxItems > 20) maxItems = 20;
+                    
+                    for(i = 0; i < maxItems; i++) {
+                        result += "• " + llList2String(wearablesData, i) + "\n";
+                    }
+                    
+                    if(llGetListLength(wearablesData) > 20) {
+                        result += "...(and " + (string)(llGetListLength(wearablesData) - 20) + " more)\n";
+                    }
+                    
+                    llInstantMessage(g_kUserID, result);
+                    g_iScanAttempts = 0;
+                    
+                    // Libérer la mémoire dès que possible
+                    wearablesData = [];
+                } else {
+                    // Aucun wearable trouvé
+                    if(g_iScanAttempts < 3) {
+                        llInstantMessage(g_kUserID, "[GuardGender] No items found yet, trying again...");
+                        llSleep(1.0);
+                        ScanAvatarWithCorrade(g_kTarget);
+                        
+                        // Libérer la mémoire
+                        metadata = [];
+                        return;
+                    } else {
+                        llInstantMessage(g_kUserID, "[GuardGender] Could not detect any items for " + llKey2Name(g_kTarget) + " after " + (string)g_iScanAttempts + " attempts.");
+                        g_iScanAttempts = 0;
+                    }
+                }
+            } else {
+                // Analyser l'erreur
+                string errorMessage = GetValueFromResponse(body, "error");
+                if(errorMessage == "") errorMessage = "Unknown error";
+                
+                if(~llSubStringIndex(errorMessage, "Entity non trouvée") || ~llSubStringIndex(errorMessage, "Entity not found")) {
+                    if(g_iScanAttempts < 3) {
+                        // Réessayer avec un délai
+                        llInstantMessage(g_kUserID, "[GuardGender] Avatar not detected yet, retrying...");
+                        llSleep(2.0);
+                        ScanAvatarWithCorrade(g_kTarget);
+                        
+                        // Libérer la mémoire
+                        metadata = [];
+                        return;
+                    } else {
+                        llInstantMessage(g_kUserID, "[GuardGender] Could not find avatar after " + (string)g_iScanAttempts + " attempts.");
+                        llInstantMessage(g_kUserID, "[GuardGender] Target might not be in range or is not visible to the bot.");
+                        g_iScanAttempts = 0;
+                    }
+                } else {
+                    // Autres erreurs
+                    llInstantMessage(g_kUserID, "[GuardGender] Corrade error: " + errorMessage);
+                }
+            }
+            
+            // Auto-Return si activé
+            if(g_iSendHomeAfterScan && g_kUserID != NULL_KEY) {
+                llInstantMessage(g_kUserID, "[GuardGender] Returning bot to home region after scan.");
+                CorradeSendHome(g_kUserID);
+            }
+            
+            g_kTarget = NULL_KEY;
+            
+            // Libérer la mémoire
+            metadata = [];
+            return;
+        }
+        
+        // Traitement des commandes de téléportation
+        if(g_sLastCommand == "teleport") {
+            if(successValue == "True") {
+                llInstantMessage(g_kUserID, "[GuardGender] Bot teleport successful! Inspecting avatar...");
+                // Attendre que le bot charge complètement
+                llSleep(2.0);
+                ScanAvatarWithCorrade(g_kTarget);
+            } else {
+                string errorMessage = GetValueFromResponse(body, "error");
+                if(errorMessage == "") errorMessage = "Unknown error";
+                
+                llInstantMessage(g_kUserID, "[GuardGender] Bot teleport failed: " + errorMessage);
+                
+                // Si c'est juste une erreur peu claire, essayer quand même
+                if(errorMessage == "Unknown error") {
+                    llInstantMessage(g_kUserID, "[GuardGender] Attempting inspection anyway...");
+                    llSleep(2.0);
+                    ScanAvatarWithCorrade(g_kTarget);
+                } else {
+                    // En cas d'erreur réelle, terminer
+                    g_kTarget = NULL_KEY;
+                    g_iScanAttempts = 0;
+                }
+            }
+        }
+        else if(g_sLastCommand == "gohome") {
+            if(successValue == "True") {
+                llInstantMessage(g_kUserID, "[GuardGender] Bot successfully sent back to home region.");
+            } else {
+                string errorMessage = GetValueFromResponse(body, "error");
+                if(errorMessage == "") errorMessage = "Unknown error";
+                
+                llInstantMessage(g_kUserID, "[GuardGender] Bot return home failed: " + errorMessage);
+            }
+            
+            g_kTarget = NULL_KEY;
+            g_iScanAttempts = 0;
+        }
+        
+        // Réinitialisation de la commande pour éviter les boucles infinies
+        g_sLastCommand = "";
+        
+        // Libérer la mémoire
+        metadata = [];
+    }
+    
+    changed(integer change) {
+        if(change & CHANGED_OWNER) {
+            llResetScript();
+        }
+        else if(change & CHANGED_INVENTORY) {
+            Debug("Inventory changed - re-registering");
+            llMessageLinked(LINK_SET, MENUNAME_RESPONSE, PARENT_MENU + "|" + MAIN_MENU, "");
+            
+            llMessageLinked(LINK_SET, MENUNAME_REMOVE, PARENT_MENU + "|SPY", "");
+            llMessageLinked(LINK_ROOT, MENUNAME_REMOVE, PARENT_MENU + "|SPY", "");
+        }
+    }
+    
+    on_rez(integer param) {
+        llResetScript();
+    }
+}
