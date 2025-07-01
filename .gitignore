@@ -1,0 +1,9 @@
+# Build artifacts
+OpenCollar-main/build/
+OpenCollar-main/bin/
+*.lslint
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
