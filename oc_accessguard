@@ -216,6 +216,25 @@ list ParseSLurl(string slurl) {
 }
 
 //----------------------------------------
+// BOT WORKFLOW FUNCTIONS
+//----------------------------------------
+// Initiates the proper bot workflow: teleport to wearer → scan target → return home
+InitiateBotScanWorkflow(key targetKey) {
+    g_kTarget = targetKey;
+    
+    if(g_kUserID == NULL_KEY) {
+        g_kUserID = llGetOwner();
+    }
+    
+    Debug("Starting bot scan workflow for target: " + llKey2Name(targetKey));
+    llInstantMessage(g_kUserID, "[GuardGender] Starting bot scan workflow for " + llKey2Name(targetKey));
+    llInstantMessage(g_kUserID, "[GuardGender] Step 1: Teleporting bot to wearer location...");
+    
+    // Step 1: Teleport bot to wearer's location
+    CorradeTeleport(targetKey);
+}
+
+//----------------------------------------
 // SCAN AVATAR AVEC GETWEARABLES
 //----------------------------------------
 ScanAvatarWithCorrade(key targetKey) {
@@ -562,12 +581,15 @@ TestCorradeConnection(key av) {
 
 CorradeTeleport(key avatarKey) {
     g_iScanAttempts = 0;
-    list avatarDetails = llGetObjectDetails(avatarKey, [OBJECT_POS, OBJECT_ROT]);
-    vector avatarPos = llList2Vector(avatarDetails, 0);
+    g_kTarget = avatarKey; // Store target for later scanning
     
-    avatarPos.z += 1.0;
+    // Get WEARER's position instead of target's position
+    list wearerDetails = llGetObjectDetails(llGetOwner(), [OBJECT_POS, OBJECT_ROT]);
+    vector wearerPos = llList2Vector(wearerDetails, 0);
     
-    string positionString = "<" + (string)avatarPos.x + "," + (string)avatarPos.y + "," + (string)avatarPos.z + ">";
+    wearerPos.z += 1.0;
+    
+    string positionString = "<" + (string)wearerPos.x + "," + (string)wearerPos.y + "," + (string)wearerPos.z + ">";
     
     string cmd = wasKeyValueEncode([
         "command", "teleport",
@@ -581,13 +603,13 @@ CorradeTeleport(key avatarKey) {
     
     g_sLastCommand = "teleport";
     
-    Debug("Sending teleport request to Corrade with position: " + positionString);
+    Debug("Teleporting bot to wearer's position: " + positionString + " to scan target: " + llKey2Name(avatarKey));
     g_kRequestID = llHTTPRequest(CORRADE_URL, 
         [HTTP_METHOD, "POST", HTTP_MIMETYPE, "application/x-www-form-urlencoded"], 
         cmd);
         
     // Libérer la mémoire
-    avatarDetails = [];
+    wearerDetails = [];
 }
 
 CorradeSendHome(key av) {
@@ -924,22 +946,22 @@ default {
             if(avatarIndex >= 0) {
                 g_kTarget = llList2Key(g_lTargetKeys, avatarIndex);
                 
-                llInstantMessage(id, "[GuardGender] Scanning avatar " + llKey2Name(g_kTarget) + " directly...");
+                llInstantMessage(id, "[GuardGender] Initiating bot scan workflow for " + llKey2Name(g_kTarget) + "...");
                 g_kUserID = id;
                 
-                // Scan direct de l'avatar
-                ScanAvatarWithCorrade(g_kTarget);
+                // Use proper teleport → scan workflow
+                InitiateBotScanWorkflow(g_kTarget);
             }
         }
         else if(g_sCurrentMenu == "uuid") {
             if(llStringLength(msg) >= 35 && (key)msg != NULL_KEY) {
                 g_kTarget = (key)msg;
                 
-                llInstantMessage(id, "[GuardGender] Scanning avatar directly...");
+                llInstantMessage(id, "[GuardGender] Initiating bot scan workflow for target UUID...");
                 g_kUserID = id;
                 
-                // Scan direct de l'avatar
-                ScanAvatarWithCorrade(g_kTarget);
+                // Use proper teleport → scan workflow
+                InitiateBotScanWorkflow(g_kTarget);
             }
             else {
                 llInstantMessage(id, "[GuardGender] Invalid UUID format. Please try again.");
@@ -1120,6 +1142,7 @@ default {
                     }
                     
                     llInstantMessage(g_kUserID, result);
+                    llInstantMessage(g_kUserID, "[GuardGender] Step 2 Complete: Avatar scan finished!");
                     g_iScanAttempts = 0;
                     
                     // Libérer la mémoire dès que possible
@@ -1167,8 +1190,10 @@ default {
             
             // Auto-Return si activé
             if(g_iSendHomeAfterScan && g_kUserID != NULL_KEY) {
-                llInstantMessage(g_kUserID, "[GuardGender] Returning bot to home region after scan.");
+                llInstantMessage(g_kUserID, "[GuardGender] Step 3: Returning bot to home region after scan.");
                 CorradeSendHome(g_kUserID);
+            } else if(g_kUserID != NULL_KEY) {
+                llInstantMessage(g_kUserID, "[GuardGender] Workflow Complete: Bot scan finished (auto-return disabled).");
             }
             
             g_kTarget = NULL_KEY;
@@ -1181,7 +1206,8 @@ default {
         // Traitement des commandes de téléportation
         if(g_sLastCommand == "teleport") {
             if(successValue == "True") {
-                llInstantMessage(g_kUserID, "[GuardGender] Bot teleport successful! Inspecting avatar...");
+                llInstantMessage(g_kUserID, "[GuardGender] Step 1 Complete: Bot teleported to wearer location!");
+                llInstantMessage(g_kUserID, "[GuardGender] Step 2: Scanning target avatar...");
                 // Attendre que le bot charge complètement
                 llSleep(2.0);
                 ScanAvatarWithCorrade(g_kTarget);
@@ -1189,15 +1215,16 @@ default {
                 string errorMessage = GetValueFromResponse(body, "error");
                 if(errorMessage == "") errorMessage = "Unknown error";
                 
-                llInstantMessage(g_kUserID, "[GuardGender] Bot teleport failed: " + errorMessage);
+                llInstantMessage(g_kUserID, "[GuardGender] Step 1 Failed: Bot teleport failed: " + errorMessage);
                 
                 // Si c'est juste une erreur peu claire, essayer quand même
                 if(errorMessage == "Unknown error") {
-                    llInstantMessage(g_kUserID, "[GuardGender] Attempting inspection anyway...");
+                    llInstantMessage(g_kUserID, "[GuardGender] Attempting Step 2 anyway...");
                     llSleep(2.0);
                     ScanAvatarWithCorrade(g_kTarget);
                 } else {
                     // En cas d'erreur réelle, terminer
+                    llInstantMessage(g_kUserID, "[GuardGender] Workflow terminated due to teleport failure.");
                     g_kTarget = NULL_KEY;
                     g_iScanAttempts = 0;
                 }
@@ -1205,12 +1232,14 @@ default {
         }
         else if(g_sLastCommand == "gohome") {
             if(successValue == "True") {
-                llInstantMessage(g_kUserID, "[GuardGender] Bot successfully sent back to home region.");
+                llInstantMessage(g_kUserID, "[GuardGender] Step 3 Complete: Bot successfully returned to home region.");
+                llInstantMessage(g_kUserID, "[GuardGender] Workflow Complete: All steps finished successfully!");
             } else {
                 string errorMessage = GetValueFromResponse(body, "error");
                 if(errorMessage == "") errorMessage = "Unknown error";
                 
-                llInstantMessage(g_kUserID, "[GuardGender] Bot return home failed: " + errorMessage);
+                llInstantMessage(g_kUserID, "[GuardGender] Step 3 Failed: Bot return home failed: " + errorMessage);
+                llInstantMessage(g_kUserID, "[GuardGender] Workflow Complete: Scan finished but return home failed.");
             }
             
             g_kTarget = NULL_KEY;
