@@ -109,7 +109,7 @@ integer IsPrivileged(integer auth)
     return (auth==CMD_OWNER || auth==CMD_TRUSTED);
 }
 
-Dialog(key kID,string prompt,list buttons,list util,int page,integer auth,string name)
+Dialog(key kID,string prompt,list buttons,list util,integer page,integer auth,string name)
 {
     key dlg=llGenerateKey();
     llMessageLinked(LINK_SET,DIALOG,(string)kID+"|"+prompt+"|"+(string)page+"|"+llDumpList2String(buttons,"`")+"|"+llDumpList2String(util,"`")+"|"+(string)auth,dlg);
@@ -136,7 +136,9 @@ GenderMenu(key kID,integer auth)
 
 EditListMenu(key kID,integer auth,string type)
 {
-    list data = (type=="male")?g_lMaleBodies:g_lFemaleBodies;
+    list data;
+    if(type=="male") data = g_lMaleBodies;
+    else data = g_lFemaleBodies;
     string title = "\\nEdit "+type+" bodies";
     list btn = ["Add","Remove","Clear"];
     Dialog(kID,title,btn,[UPMENU],0,auth,"edit"+type);
@@ -144,7 +146,9 @@ EditListMenu(key kID,integer auth,string type)
 
 RemoveListMenu(key kID,integer auth,string type)
 {
-    list data = (type=="male")?g_lMaleBodies:g_lFemaleBodies;
+    list data;
+    if(type=="male") data = g_lMaleBodies;
+    else data = g_lFemaleBodies;
     list btn = llList2List(data,0,8);
     if(llGetListLength(btn)==0) btn=["(None)"]; // show placeholder
     Dialog(kID,"\\nTap item to remove",btn,[UPMENU],0,auth,"rem"+type);
@@ -170,7 +174,7 @@ HandleMenuAccess(integer auth,key id)
     llMessageLinked(LINK_SET,auth,"menu",id); // forward
 }
 
-state default
+default
 {
     state_entry()
     {
@@ -320,7 +324,7 @@ state default
         {
             if(g_iVisibleOnLeash)
             {
-                g_iHiddenBeforeLeash=!llGetLinkAlpha(LINK_ROOT,ALL_SIDES);
+                g_iHiddenBeforeLeash=(llGetAlpha(ALL_SIDES)==0.0);
                 if(g_iHiddenBeforeLeash)
                     llMessageLinked(LINK_THIS,CMD_OWNER,"show",g_kWearer);
             }
